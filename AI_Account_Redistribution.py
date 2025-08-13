@@ -1,49 +1,59 @@
 import pandas as pd
 import streamlit as st
+from xgboost import XGBClassifier
+from sklearn.preprocessing import LabelEncoder
 
-# --- Pseudo-database: hardcoded data ---
-def load_data():
-    data = {
-        "Account ID": [1, 2, 3, 4, 5, 6],
-        "Advisor Name": ["Alice", "Bob", "Alice", "Charlie", "Bob", "Diana"],
-        "Location": ["NY", "NY", "LA", "LA", "NY", "SF"],
-        "Specialty": ["Tech", "Finance", "Tech", "Retail", "Finance", "Tech"],
-        "Assets": [100000, 150000, 120000, 130000, 90000, 110000],
-    }
-    return pd.DataFrame(data)
+# --- Load Excel ---
+def load_data(file):
+    """
+    Reads advisor account data from uploaded Excel file.
+    Expected columns: Account ID, Advisor Name, Location, Specialty, Assets
+    """
+    return pd.read_excel(file)
 
-# --- AI-based Redistribution logic ---
-def redistribute_accounts(df, retiring_advisor):
+# --- Train AI model ---
+def train_model(df):
+    df_train = df.copy()
+    le_location = LabelEncoder()
+    le_specialty = LabelEncoder()
+    le_advisor = LabelEncoder()
+
+    df_train["Location_enc"] = le_location.fit_transform(df_train["Location"])
+    df_train["Specialty_enc"] = le_specialty.fit_transform(df_train["Specialty"])
+    df_train["Advisor_enc"] = le_advisor.fit_transform(df_train["Advisor Name"])
+
+    X = df_train[["Location_enc", "Specialty_enc", "Assets"]]
+    y = df_train["Advisor_enc"]
+
+    model = XGBClassifier(use_label_encoder=False, eval_metric='mlogloss')
+    model.fit(X, y)
+
+    return model, le_location, le_specialty, le_advisor
+
+# --- AI Redistribution ---
+def redistribute_accounts_ai(df, retiring_advisor, model, le_location, le_specialty, le_advisor):
     remaining_advisors = [a for a in df["Advisor Name"].unique() if a != retiring_advisor]
     retiring_accounts = df[df["Advisor Name"] == retiring_advisor].copy()
     remaining_data = df[df["Advisor Name"] != retiring_advisor].copy()
 
     recommendations = []
+    remaining_advisor_enc = le_advisor.transform(remaining_advisors)
 
     for _, account in retiring_accounts.iterrows():
-        scores = {}
+        # Encode features
+        loc_enc = le_location.transform([account["Location"]])[0]
+        spec_enc = le_specialty.transform([account["Specialty"]])[0]
+        features = [[loc_enc, spec_enc, account["Assets"]]]
 
-        for adv in remaining_advisors:
-            adv_accounts = remaining_data[remaining_data["Advisor Name"] == adv]
+        # Predict advisor
+        pred_enc = model.predict(features)[0]
+        target = le_advisor.inverse_transform([pred_enc])[0]
 
-            # Location similarity: 1 if matches, else 0
-            location_score = 1 if adv_accounts["Location"].iloc[0] == account["Location"] else 0
+        # Fallback if predicted advisor is retiring
+        if target == retiring_advisor:
+            target = remaining_advisors[0]
 
-            # Specialty similarity: 1 if matches, else 0
-            specialty_score = 1 if adv_accounts["Specialty"].iloc[0] == account["Specialty"] else 0
-
-            # Workload penalty: inverse of number of accounts + 1 (to avoid div by zero)
-            workload = len(adv_accounts)
-            workload_score = 1 / (workload + 1)
-
-            # Weighted total score (tune weights if you want)
-            total_score = 2 * location_score + 1.5 * specialty_score + 1 * workload_score
-
-            scores[adv] = total_score
-
-        # Pick advisor with highest total score
-        target = max(scores, key=scores.get)
-        reason = f"AI score {scores[target]:.2f}, assigned to {target}."
+        reason = f"Predicted by AI model as best fit: {target}."
 
         recommendations.append({
             "Account ID": account["Account ID"],
@@ -54,36 +64,37 @@ def redistribute_accounts(df, retiring_advisor):
             "Reason": reason
         })
 
-        # Add reassigned account to remaining_data to update workload
+        # Update remaining_data to reflect new workload
         remaining_data = pd.concat([remaining_data, pd.DataFrame([account]).assign(**{"Advisor Name": target})])
 
     return pd.DataFrame(recommendations)
 
 # --- Streamlit UI ---
+st.title("AI-Powered Advisor Redistribution Tool")
 
-st.title("Advisor Retirement Redistribution Tool")
+# File uploader
+uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx"])
+if uploaded_file:
+    df = load_data(uploaded_file)
 
-# Load pseudo database automatically (no file upload)
-df = load_data()
+    # Train AI model
+    model, le_location, le_specialty, le_advisor = train_model(df)
 
-advisors = df["Advisor Name"].unique().tolist()
-retiring_advisor = st.selectbox("Select Advisor to Retire", advisors)
+    advisors = df["Advisor Name"].unique().tolist()
+    retiring_advisor = st.selectbox("Select Advisor to Retire", advisors)
 
-if st.button("Generate Recommendations"):
-    recommendations_df = redistribute_accounts(df, retiring_advisor)
+    if st.button("Generate Recommendations"):
+        recommendations_df = redistribute_accounts_ai(df, retiring_advisor, model, le_location, le_specialty, le_advisor)
 
-    st.subheader("Redistribution Plan")
-    st.dataframe(recommendations_df)
+        st.subheader("Redistribution Plan")
+        st.dataframe(recommendations_df)
 
-    st.subheader("Before & After Workload Distribution")
+        st.subheader("Before & After Workload Distribution")
+        before_counts = df["Advisor Name"].value_counts()
+        after_counts = pd.concat([
+            df[df["Advisor Name"] != retiring_advisor]["Advisor Name"],
+            recommendations_df["New Advisor"]
+        ]).value_counts()
 
-    before_counts = df["Advisor Name"].value_counts()
-
-    after_counts = pd.concat([
-        df[df["Advisor Name"] != retiring_advisor]["Advisor Name"],
-        recommendations_df["New Advisor"]
-    ]).value_counts()
-
-    workload_df = pd.DataFrame({"Before": before_counts, "After": after_counts}).fillna(0)
-
-    st.bar_chart(workload_df)
+        workload_df = pd.DataFrame({"Before": before_counts, "After": after_counts}).fillna(0)
+        st.bar_chart(workload_df)
