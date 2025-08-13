@@ -72,12 +72,12 @@ def redistribute_accounts_ai(df, retiring_advisor, model, le_location, le_specia
 # --- Streamlit UI ---
 st.title("AI-Powered Advisor Redistribution Tool")
 
-# File uploader
+# --- File uploader ---
 uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx"])
 if uploaded_file:
     df = load_data(uploaded_file)
 
-    # Train AI model
+    # Train AI model on uploaded data
     model, le_location, le_specialty, le_advisor = train_model(df)
 
     advisors = df["Advisor Name"].unique().tolist()
@@ -95,6 +95,5 @@ if uploaded_file:
             df[df["Advisor Name"] != retiring_advisor]["Advisor Name"],
             recommendations_df["New Advisor"]
         ]).value_counts()
-
         workload_df = pd.DataFrame({"Before": before_counts, "After": after_counts}).fillna(0)
         st.bar_chart(workload_df)
