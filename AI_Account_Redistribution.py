@@ -3,7 +3,7 @@ import streamlit as st
 from xgboost import XGBClassifier
 from sklearn.preprocessing import LabelEncoder
 
-# --- Load Excel from local file ---
+#Load Excel from local file
 @st.cache_data
 def load_data(file_path):
     """
@@ -12,46 +12,66 @@ def load_data(file_path):
     """
     return pd.read_excel(file_path)
 
-# --- Train AI model ---
+#Train AI model
 def train_model(df):
+    
+    #making a copy of the dataframe to avoid modifying the original
     df_train = df.copy()
+    
+    #initializing label encoders
     le_location = LabelEncoder()
     le_specialty = LabelEncoder()
     le_advisor = LabelEncoder()
 
+    #encoding categorical variables
     df_train["Location_enc"] = le_location.fit_transform(df_train["Location"])
     df_train["Specialty_enc"] = le_specialty.fit_transform(df_train["Specialty"])
     df_train["Advisor_enc"] = le_advisor.fit_transform(df_train["Advisor Name"])
 
+    #features and target variable
     X = df_train[["Location_enc", "Specialty_enc", "Assets"]]
     y = df_train["Advisor_enc"]
 
+    #creates a classifier to train the model
     model = XGBClassifier(use_label_encoder=False, eval_metric='mlogloss')
     model.fit(X, y)
 
     return model, le_location, le_specialty, le_advisor
 
-# --- AI Redistribution ---
+#AI Redistribution
 def redistribute_accounts_ai(df, retiring_advisor, model, le_location, le_specialty, le_advisor):
+    
+    #list of advisors excluding the retiring one
     remaining_advisors = [a for a in df["Advisor Name"].unique() if a != retiring_advisor]
+    
+    #separating accounts of retiring advisor and others
     retiring_accounts = df[df["Advisor Name"] == retiring_advisor].copy()
+    
+    #data of remaining advisors
     remaining_data = df[df["Advisor Name"] != retiring_advisor].copy()
 
     recommendations = []
 
+    #loops through each account of the retiring advisor and encodes features for prediction numerically
     for _, account in retiring_accounts.iterrows():
         loc_enc = le_location.transform([account["Location"]])[0]
         spec_enc = le_specialty.transform([account["Specialty"]])[0]
+        
+        #makes a set for the features for the model
         features = [[loc_enc, spec_enc, account["Assets"]]]
 
+        #predicts the best fit advisor for the account/ converts back to original advisor name from encoded numerical value
         pred_enc = model.predict(features)[0]
         target = le_advisor.inverse_transform([pred_enc])[0]
 
+        #if the predicted advisor is the retiring one, assign to the first remaining advisor
         if target == retiring_advisor:
             target = remaining_advisors[0]
 
+        #reason for recommendation
         reason = f"Predicted by AI model as best fit: {target}."
 
+        #appends the recommendation to the list
         recommendations.append({
             "Account ID": account["Account ID"],
             "Assets": account["Assets"],
@@ -61,35 +81,40 @@ def redistribute_accounts_ai(df, retiring_advisor, model, le_location, le_specia
             "Reason": reason
         })
 
+        #updates the remaining data to include the reassigned account
         remaining_data = pd.concat(
             [remaining_data, pd.DataFrame([account]).assign(**{"Advisor Name": target})]
         )
 
     return pd.DataFrame(recommendations)
 
-# --- Streamlit UI ---
+#Streamlit UI
 st.title("AI-Powered Advisor Redistribution Tool")
 
-# Load the data directly from a local file instead of file uploader
-excel_path = "advisors.xlsx"  # <-- put your Excel file here
+#load the data directly from local file
+excel_path = "advisors.xlsx"
 df = load_data(excel_path)
 
+#display the dataframe
 st.subheader("All Advisors & Accounts")
 st.dataframe(df)
 
-# Train AI model
+#train AI model
 model, le_location, le_specialty, le_advisor = train_model(df)
 
-# Select retiring advisor
+#select retiring advisor
 advisors = df["Advisor Name"].unique().tolist()
 retiring_advisor = st.selectbox("Select Advisor to Retire", advisors)
 
+#if button to generate recommendations is clicked
 if st.button("Generate Recommendations"):
     recommendations_df = redistribute_accounts_ai(df, retiring_advisor, model, le_location, le_specialty, le_advisor)
 
+    #display recommendations as a table
     st.subheader("Redistribution Plan")
     st.dataframe(recommendations_df)
 
+    #display workload distribution before and after
     st.subheader("Before & After Workload Distribution")
     before_counts = df["Advisor Name"].value_counts()
     after_counts = pd.concat([
@@ -98,3 +123,10 @@ if st.button("Generate Recommendations"):
     ]).value_counts()
     workload_df = pd.DataFrame({"Before": before_counts, "After": after_counts}).fillna(0)
     st.bar_chart(workload_df)
+    
+    
+    #python3 -m venv venv
+    #source venv/bin/activate
+    #pip install --upgrade pip
+    #pip install streamlit pandas numpy scikit-learn xgboost openpyxl
+    #python3 -m streamlit run AI_Account_Redistribution.py
