@@ -3,13 +3,14 @@ import streamlit as st
 from xgboost import XGBClassifier
 from sklearn.preprocessing import LabelEncoder
 
-# --- Load Excel ---
-def load_data(file):
+# --- Load Excel from local file ---
+@st.cache_data
+def load_data(file_path):
     """
-    Reads advisor account data from uploaded Excel file.
+    Reads advisor account data from Excel file stored locally.
     Expected columns: Account ID, Advisor Name, Location, Specialty, Assets
     """
-    return pd.read_excel(file)
+    return pd.read_excel(file_path)
 
 # --- Train AI model ---
 def train_model(df):
@@ -37,19 +38,15 @@ def redistribute_accounts_ai(df, retiring_advisor, model, le_location, le_specia
     remaining_data = df[df["Advisor Name"] != retiring_advisor].copy()
 
     recommendations = []
-    remaining_advisor_enc = le_advisor.transform(remaining_advisors)
 
     for _, account in retiring_accounts.iterrows():
-        # Encode features
         loc_enc = le_location.transform([account["Location"]])[0]
         spec_enc = le_specialty.transform([account["Specialty"]])[0]
         features = [[loc_enc, spec_enc, account["Assets"]]]
 
-        # Predict advisor
         pred_enc = model.predict(features)[0]
         target = le_advisor.inverse_transform([pred_enc])[0]
 
-        # Fallback if predicted advisor is retiring
         if target == retiring_advisor:
             target = remaining_advisors[0]
 
@@ -64,36 +61,40 @@ def redistribute_accounts_ai(df, retiring_advisor, model, le_location, le_specia
             "Reason": reason
         })
 
-        # Update remaining_data to reflect new workload
-        remaining_data = pd.concat([remaining_data, pd.DataFrame([account]).assign(**{"Advisor Name": target})])
+        remaining_data = pd.concat(
+            [remaining_data, pd.DataFrame([account]).assign(**{"Advisor Name": target})]
+        )
 
     return pd.DataFrame(recommendations)
 
 # --- Streamlit UI ---
 st.title("AI-Powered Advisor Redistribution Tool")
 
-# --- File uploader ---
-uploaded_file = st.file_uploader("Upload Excel file", type=["xlsx"])
-if uploaded_file:
-    df = load_data(uploaded_file)
+# Load the data directly from a local file instead of file uploader
+excel_path = "advisors.xlsx"  # <-- put your Excel file here
+df = load_data(excel_path)
 
-    # Train AI model on uploaded data
-    model, le_location, le_specialty, le_advisor = train_model(df)
+st.subheader("All Advisors & Accounts")
+st.dataframe(df)
 
-    advisors = df["Advisor Name"].unique().tolist()
-    retiring_advisor = st.selectbox("Select Advisor to Retire", advisors)
+# Train AI model
+model, le_location, le_specialty, le_advisor = train_model(df)
 
-    if st.button("Generate Recommendations"):
-        recommendations_df = redistribute_accounts_ai(df, retiring_advisor, model, le_location, le_specialty, le_advisor)
+# Select retiring advisor
+advisors = df["Advisor Name"].unique().tolist()
+retiring_advisor = st.selectbox("Select Advisor to Retire", advisors)
 
-        st.subheader("Redistribution Plan")
-        st.dataframe(recommendations_df)
+if st.button("Generate Recommendations"):
+    recommendations_df = redistribute_accounts_ai(df, retiring_advisor, model, le_location, le_specialty, le_advisor)
 
-        st.subheader("Before & After Workload Distribution")
-        before_counts = df["Advisor Name"].value_counts()
-        after_counts = pd.concat([
-            df[df["Advisor Name"] != retiring_advisor]["Advisor Name"],
-            recommendations_df["New Advisor"]
-        ]).value_counts()
-        workload_df = pd.DataFrame({"Before": before_counts, "After": after_counts}).fillna(0)
-        st.bar_chart(workload_df)
+    st.subheader("Redistribution Plan")
+    st.dataframe(recommendations_df)
+
+    st.subheader("Before & After Workload Distribution")
+    before_counts = df["Advisor Name"].value_counts()
+    after_counts = pd.concat([
+        df[df["Advisor Name"] != retiring_advisor]["Advisor Name"],
+        recommendations_df["New Advisor"]
+    ]).value_counts()
+    workload_df = pd.DataFrame({"Before": before_counts, "After": after_counts}).fillna(0)
+    st.bar_chart(workload_df)
