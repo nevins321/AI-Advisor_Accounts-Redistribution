@@ -7,7 +7,6 @@ from sklearn.preprocessing import LabelEncoder
 # Streamlit page config
 st.set_page_config(
     page_title="AI-Powered Advisor Redistribution",
-    page_icon="🤖",
     layout="wide"
 )
 
@@ -123,10 +122,10 @@ if st.button("Generate Recommendations"):
     recommendations_df = redistribute_accounts_ai(df, retiring_advisor, model, le_location, le_specialty, le_advisor)
 
     # Confirmation message
-    st.success(f"✅ Redistribution complete for retiring advisor: {retiring_advisor}")
+    st.success(f"Redistribution complete for retiring advisor: {retiring_advisor}")
 
     # Display recommendations as a table
-    with st.expander("📌 View Redistribution Plan"):
+    with st.expander("View Redistribution Plan"):
         st.dataframe(recommendations_df, use_container_width=True)
 
     # Display workload distribution before and after
