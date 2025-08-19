@@ -1,5 +1,7 @@
 import pandas as pd
 import streamlit as st
+from xgboost import XGBClassifier
+from sklearn.preprocessing import LabelEncoder
 import random
 from io import BytesIO
 
@@ -10,11 +12,11 @@ def load_data(file_path="advisors_extended.xlsx"):
 
 # --- Fixed Weights for 10 Attributes ---
 FIXED_WEIGHTS = {
-    "Location/Region": 15,
-    "Specialty/Expertise": 15,
+    "Location": 15,
+    "Specialty": 15,
     "Languages Spoken": 20,
     "Licenses & Certifications": 10,
-    "Experience (Years in Industry)": 10,
+    "Experience (Years)": 10,
     "Performance Score": 10,
     "Client Load (Capacity)": 5,
     "Account Size": 5,
@@ -22,8 +24,36 @@ FIXED_WEIGHTS = {
     "Household Composition": 5,
 }
 
-# --- Redistribution logic with balancing ---
-def redistribute_accounts_ai(df, retiring_advisor, balance_factor=0.5):
+# --- Train XGBoost Model ---
+def train_model(df):
+    df_train = df.copy()
+    encoders = {}
+
+    # Encode categorical columns
+    for col in ["Location", "Specialty", "Languages Spoken", "Licenses & Certifications",
+                "Account Type", "Household Composition"]:
+        le = LabelEncoder()
+        df_train[col] = le.fit_transform(df_train[col].astype(str))
+        encoders[col] = le
+
+    # Encode target (Advisor)
+    le_target = LabelEncoder()
+    df_train["Advisor_enc"] = le_target.fit_transform(df_train["Advisor Name"])
+
+    feature_cols = ["Location", "Specialty", "Languages Spoken", "Licenses & Certifications",
+                    "Experience (Years)", "Performance Score", "Client Load (Capacity)",
+                    "Assets", "Account Type", "Household Composition"]
+
+    X = df_train[feature_cols]
+    y = df_train["Advisor_enc"]
+
+    model = XGBClassifier(use_label_encoder=False, eval_metric='mlogloss')
+    model.fit(X, y)
+
+    return model, encoders, le_target, feature_cols
+
+# --- Redistribution logic ---
+def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, feature_cols, balance_factor=0.5):
     remaining_advisors = [a for a in df["Advisor Name"].unique() if a != retiring_advisor]
     retiring_accounts = df[df["Advisor Name"] == retiring_advisor].copy()
     remaining_data = df[df["Advisor Name"] != retiring_advisor].copy()
@@ -38,29 +68,41 @@ def redistribute_accounts_ai(df, retiring_advisor, balance_factor=0.5):
         scores = {}
         total_weight = sum(FIXED_WEIGHTS.values())
 
+        # Prepare account features for AI model
+        acc_features = account.copy()
+        for col, le in encoders.items():
+            acc_features[col] = le.transform([str(account[col])])[0]
+        X_acc = [acc_features[feature_cols].values]
+
+        pred_probs = model.predict_proba(X_acc)[0]
+
         for adv in remaining_advisors:
             adv_data = df[df["Advisor Name"] == adv].iloc[0]
             score = 0
 
-            # --- Categorical Matching ---
-            for category in ["Location/Region", "Specialty/Expertise", "Languages Spoken",
+            # --- Weighted categorical matching ---
+            for category in ["Location", "Specialty", "Languages Spoken",
                              "Licenses & Certifications", "Account Type", "Household Composition"]:
-                if category in df.columns and pd.notna(account.get(category)) and pd.notna(adv_data.get(category)):
+                if pd.notna(account.get(category)) and pd.notna(adv_data.get(category)):
                     if str(account[category]).strip().lower() == str(adv_data[category]).strip().lower():
                         score += FIXED_WEIGHTS[category]
 
-            # --- Numerical Matching ---
-            for num_col in ["Experience (Years in Industry)", "Performance Score", "Account Size"]:
-                if num_col in df.columns and pd.notna(account.get(num_col)) and pd.notna(adv_data.get(num_col)):
+            # --- Weighted numerical similarity ---
+            for num_col in ["Experience (Years)", "Performance Score", "Account Size"]:
+                if pd.notna(account.get(num_col)) and pd.notna(adv_data.get(num_col)):
                     diff = abs(float(account[num_col]) - float(adv_data[num_col]))
                     similarity = 1 / (1 + diff)
                     score += FIXED_WEIGHTS[num_col] * similarity
 
             # --- Capacity balancing ---
             load_penalty = advisor_loads.get(adv, 0)
-            score -= balance_factor * load_penalty  
+            score -= balance_factor * load_penalty
 
-            scores[adv] = score / total_weight * 100  
+            # --- AI model confidence ---
+            adv_enc = le_target.transform([adv])[0]
+            score += 100 * pred_probs[adv_enc]
+
+            scores[adv] = score / (total_weight + 100) * 100
 
         # Pick best advisor
         max_score = max(scores.values())
@@ -85,11 +127,7 @@ def redistribute_accounts_ai(df, retiring_advisor, balance_factor=0.5):
 st.set_page_config(page_title="AI-Powered Advisor Redistribution", page_icon="🤖", layout="wide")
 st.title("AI-Powered Advisor Redistribution Tool")
 
-try:
-    df = load_data()
-except FileNotFoundError:
-    st.error("Error: 'advisors.xlsx' not found.")
-    st.stop()
+df = load_data()
 
 st.metric("Total Advisors", df["Advisor Name"].nunique())
 st.metric("Total Accounts", len(df))
@@ -97,10 +135,13 @@ st.metric("Total Accounts", len(df))
 with st.expander("View All Advisors & Accounts"):
     st.dataframe(df, use_container_width=True)
 
+# Train model
+model, encoders, le_target, feature_cols = train_model(df)
+
 retiring_advisor = st.selectbox("Select Advisor to Retire", df["Advisor Name"].unique().tolist())
 
 if st.button("Generate Recommendations"):
-    recommendations_df = redistribute_accounts_ai(df, retiring_advisor)
+    recommendations_df = redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, feature_cols)
 
     st.success(f"✅ Redistribution complete for retiring advisor: {retiring_advisor}")
     st.dataframe(recommendations_df, use_container_width=True)
@@ -126,10 +167,6 @@ if st.button("Generate Recommendations"):
 
     st.subheader("Before & After Asset Distribution")
     st.bar_chart(assets_df)
-
-    # Pie chart
-    st.subheader("After Redistribution - Account Share")
-    st.pyplot(workload_df["After"].plot.pie(autopct='%1.1f%%', figsize=(6,6)).get_figure())
 
     # Export Excel
     output = BytesIO()
