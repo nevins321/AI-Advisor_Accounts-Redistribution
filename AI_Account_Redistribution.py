@@ -10,20 +10,6 @@ from io import BytesIO
 def load_data(file_path="advisors_extended.xlsx"):
     return pd.read_excel(file_path)
 
-# --- Fixed Weights for 10 Attributes ---
-FIXED_WEIGHTS = {
-    "Location": 15,
-    "Specialty": 15,
-    "Languages Spoken": 20,
-    "Licenses & Certifications": 10,
-    "Experience (Years)": 10,
-    "Performance Score": 10,
-    "Client Load (Capacity)": 5,
-    "Account Size": 5,
-    "Account Type": 5,
-    "Household Composition": 5,
-}
-
 # --- Train XGBoost Model ---
 def train_model(df):
     df_train = df.copy()
@@ -52,8 +38,8 @@ def train_model(df):
 
     return model, encoders, le_target, feature_cols
 
-# --- Redistribution logic with explanations ---
-def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, feature_cols, balance_factor=0.5):
+# --- Redistribution logic with user-defined weights ---
+def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, feature_cols, weights, balance_factor=0.5):
     remaining_advisors = [a for a in df["Advisor Name"].unique() if a != retiring_advisor]
     retiring_accounts = df[df["Advisor Name"] == retiring_advisor].copy()
     remaining_data = df[df["Advisor Name"] != retiring_advisor].copy()
@@ -67,7 +53,7 @@ def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, f
         scores = {}
         explanations = {}
         summaries = {}
-        total_weight = sum(FIXED_WEIGHTS.values())
+        total_weight = sum(weights.values())
 
         acc_features = account.copy()
         for col, le in encoders.items():
@@ -86,7 +72,7 @@ def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, f
                              "Licenses & Certifications", "Account Type", "Household Composition"]:
                 if pd.notna(account.get(category)) and pd.notna(adv_data.get(category)):
                     if str(account[category]).strip().lower() == str(adv_data[category]).strip().lower():
-                        score += FIXED_WEIGHTS[category]
+                        score += weights.get(category, 0)
                         reason_parts.append(f"✅ {category} matched")
                         narrative_parts.append(f"same {category.lower()}")
 
@@ -95,9 +81,9 @@ def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, f
                 if pd.notna(account.get(num_col)) and pd.notna(adv_data.get(num_col)):
                     diff = abs(float(account[num_col]) - float(adv_data[num_col]))
                     similarity = 1 / (1 + diff)
-                    contribution = FIXED_WEIGHTS[num_col] * similarity
+                    contribution = weights.get(num_col, 0) * similarity
                     score += contribution
-                    reason_parts.append(f"{num_col} similarity contributed {contribution:.1f}")
+                    reason_parts.append(f"{num_col} similarity contributed {contribution:.3f}")
                     narrative_parts.append(f"similar {num_col.lower()}")
 
             # --- Capacity penalty ---
@@ -115,7 +101,7 @@ def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, f
             reason_parts.append(f"🤖 AI model confidence +{confidence:.1f}")
             narrative_parts.append("high AI confidence")
 
-            scores[adv] = score / (total_weight + 100) * 100
+            scores[adv] = score / (total_weight + 100) * 100 if total_weight > 0 else score
             explanations[adv] = "; ".join(reason_parts)
             summaries[adv] = "Assigned to {} due to {}".format(
                 adv, ", ".join(narrative_parts[:3]) + ("..." if len(narrative_parts) > 3 else "")
@@ -153,13 +139,34 @@ st.metric("Total Accounts", len(df))
 with st.expander("View All Advisors & Accounts"):
     st.dataframe(df, use_container_width=True)
 
+# --- User-defined sliders (0–1) ---
+st.subheader("Set Weightage for Matching Criteria (0 to 1)")
+criteria = [
+    "Location",
+    "Specialty",
+    "Languages Spoken",
+    "Licenses & Certifications",
+    "Experience (Years)",
+    "Performance Score",
+    "Client Load (Capacity)",
+    "Account Size",
+    "Account Type",
+    "Household Composition"
+]
+
+user_weights = {}
+for c in criteria:
+    user_weights[c] = st.slider(f"{c} Weight", min_value=0.0, max_value=1.0, value=0.0, step=0.01)
+
 # Train model
 model, encoders, le_target, feature_cols = train_model(df)
 
 retiring_advisor = st.selectbox("Select Advisor to Retire", df["Advisor Name"].unique().tolist())
 
 if st.button("Generate Recommendations"):
-    recommendations_df = redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, feature_cols)
+    recommendations_df = redistribute_accounts_ai(
+        df, retiring_advisor, model, encoders, le_target, feature_cols, weights=user_weights
+    )
 
     st.success(f"✅ Redistribution complete for retiring advisor: {retiring_advisor}")
     st.dataframe(recommendations_df.drop(columns=["Summary", "Detailed Explanation"]), use_container_width=True)
@@ -178,7 +185,6 @@ if st.button("Generate Recommendations"):
         recommendations_df["New Advisor"]
     ]).value_counts()
     workload_df = pd.DataFrame({"Before": before_counts, "After": after_counts}).fillna(0)
-
     st.subheader("Before & After Workload Distribution")
     st.bar_chart(workload_df)
 
@@ -189,11 +195,10 @@ if st.button("Generate Recommendations"):
         recommendations_df[["New Advisor", "Assets"]].rename(columns={"New Advisor": "Advisor Name"})
     ]).groupby("Advisor Name")["Assets"].sum()
     assets_df = pd.DataFrame({"Before Assets": before_assets, "After Assets": after_assets}).fillna(0)
-
     st.subheader("Before & After Asset Distribution")
     st.bar_chart(assets_df)
 
-    # Export Excel (including explanations!)
+    # Export Excel
     output = BytesIO()
     recommendations_df.to_excel(output, index=False, engine="openpyxl")
     st.download_button(
