@@ -52,13 +52,12 @@ def train_model(df):
 
     return model, encoders, le_target, feature_cols
 
-# --- Redistribution logic ---
+# --- Redistribution logic with explanations ---
 def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, feature_cols, balance_factor=0.5):
     remaining_advisors = [a for a in df["Advisor Name"].unique() if a != retiring_advisor]
     retiring_accounts = df[df["Advisor Name"] == retiring_advisor].copy()
     remaining_data = df[df["Advisor Name"] != retiring_advisor].copy()
 
-    # Precompute advisor stats
     advisor_loads = remaining_data["Advisor Name"].value_counts().to_dict()
     advisor_assets = remaining_data.groupby("Advisor Name")["Assets"].sum().to_dict()
 
@@ -66,50 +65,67 @@ def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, f
 
     for _, account in retiring_accounts.iterrows():
         scores = {}
+        explanations = {}
+        summaries = {}
         total_weight = sum(FIXED_WEIGHTS.values())
 
-        # Prepare account features for AI model
         acc_features = account.copy()
         for col, le in encoders.items():
             acc_features[col] = le.transform([str(account[col])])[0]
         X_acc = [acc_features[feature_cols].values]
-
         pred_probs = model.predict_proba(X_acc)[0]
 
         for adv in remaining_advisors:
             adv_data = df[df["Advisor Name"] == adv].iloc[0]
             score = 0
+            reason_parts = []
+            narrative_parts = []
 
-            # --- Weighted categorical matching ---
+            # --- Categorical matching ---
             for category in ["Location", "Specialty", "Languages Spoken",
                              "Licenses & Certifications", "Account Type", "Household Composition"]:
                 if pd.notna(account.get(category)) and pd.notna(adv_data.get(category)):
                     if str(account[category]).strip().lower() == str(adv_data[category]).strip().lower():
                         score += FIXED_WEIGHTS[category]
+                        reason_parts.append(f"✅ {category} matched")
+                        narrative_parts.append(f"same {category.lower()}")
 
-            # --- Weighted numerical similarity ---
+            # --- Numerical similarity ---
             for num_col in ["Experience (Years)", "Performance Score", "Account Size"]:
                 if pd.notna(account.get(num_col)) and pd.notna(adv_data.get(num_col)):
                     diff = abs(float(account[num_col]) - float(adv_data[num_col]))
                     similarity = 1 / (1 + diff)
-                    score += FIXED_WEIGHTS[num_col] * similarity
+                    contribution = FIXED_WEIGHTS[num_col] * similarity
+                    score += contribution
+                    reason_parts.append(f"{num_col} similarity contributed {contribution:.1f}")
+                    narrative_parts.append(f"similar {num_col.lower()}")
 
-            # --- Capacity balancing ---
+            # --- Capacity penalty ---
             load_penalty = advisor_loads.get(adv, 0)
-            score -= balance_factor * load_penalty
+            penalty = balance_factor * load_penalty
+            score -= penalty
+            if penalty > 0:
+                reason_parts.append(f"⚖️ Load penalty of {penalty:.1f} applied")
+                narrative_parts.append("balanced workload")
 
             # --- AI model confidence ---
             adv_enc = le_target.transform([adv])[0]
-            score += 100 * pred_probs[adv_enc]
+            confidence = 100 * pred_probs[adv_enc]
+            score += confidence
+            reason_parts.append(f"🤖 AI model confidence +{confidence:.1f}")
+            narrative_parts.append("high AI confidence")
 
             scores[adv] = score / (total_weight + 100) * 100
+            explanations[adv] = "; ".join(reason_parts)
+            summaries[adv] = "Assigned to {} due to {}".format(
+                adv, ", ".join(narrative_parts[:3]) + ("..." if len(narrative_parts) > 3 else "")
+            )
 
         # Pick best advisor
         max_score = max(scores.values())
         best_matches = [adv for adv, sc in scores.items() if sc == max_score]
         target = random.choice(best_matches)
 
-        # Update stats
         advisor_loads[target] = advisor_loads.get(target, 0) + 1
         advisor_assets[target] = advisor_assets.get(target, 0) + account.get("Assets", 0)
 
@@ -118,7 +134,9 @@ def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, f
             "Old Advisor": retiring_advisor,
             "New Advisor": target,
             "Assets": account.get("Assets", 0),
-            "Match Score (%)": round(max_score, 1)
+            "Match Score (%)": round(max_score, 1),
+            "Summary": summaries[target],
+            "Detailed Explanation": explanations[target]
         })
 
     return pd.DataFrame(recommendations)
@@ -144,7 +162,14 @@ if st.button("Generate Recommendations"):
     recommendations_df = redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, feature_cols)
 
     st.success(f"✅ Redistribution complete for retiring advisor: {retiring_advisor}")
-    st.dataframe(recommendations_df, use_container_width=True)
+    st.dataframe(recommendations_df.drop(columns=["Summary", "Detailed Explanation"]), use_container_width=True)
+
+    with st.expander("See Explanations for Each Account"):
+        for _, row in recommendations_df.iterrows():
+            st.markdown(f"**Account {row['Account ID']} → {row['New Advisor']}**")
+            st.write("📝 Summary:", row["Summary"])
+            st.write("📊 Detailed:", row["Detailed Explanation"])
+            st.divider()
 
     # Workload balance charts
     before_counts = df["Advisor Name"].value_counts()
@@ -168,7 +193,7 @@ if st.button("Generate Recommendations"):
     st.subheader("Before & After Asset Distribution")
     st.bar_chart(assets_df)
 
-    # Export Excel
+    # Export Excel (including explanations!)
     output = BytesIO()
     recommendations_df.to_excel(output, index=False, engine="openpyxl")
     st.download_button(
