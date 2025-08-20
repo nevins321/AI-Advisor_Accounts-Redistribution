@@ -1,0 +1,1 @@
+Greedily reassigns every account from a retiring advisor to the best remaining advisor by scoring each candidate with a blend of rule-based matching, workload balancing, and an ML probability from the trained XGBoost model—then normalizes scores, picks the top choice (ties random), and iteratively updates loads so later assignments stay balanced.
