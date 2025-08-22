@@ -4,6 +4,7 @@ from xgboost import XGBClassifier
 from sklearn.preprocessing import LabelEncoder
 import random
 from io import BytesIO
+from datetime import datetime
 import os
 
 # -------------------------------
@@ -12,12 +13,14 @@ import os
 st.set_page_config(page_title="AI-Powered Advisor Redistribution", page_icon="🤖", layout="wide")
 
 FEEDBACK_FILE = "feedback.csv"
+DATA_FILE = "advisors_extended.xlsx"
+LOG_FILE = "redistribution_log.xlsx"
+OVERRIDE_LOG = "override_log.csv"
 
 # -------------------------------
 # Feedback Functions
 # -------------------------------
 def save_feedback(account_id, old_advisor, suggested_advisor, final_advisor, reasoning):
-    """Save feedback (overrides or ratings) to CSV."""
     feedback_entry = pd.DataFrame([{
         "Account ID": account_id,
         "Old Advisor": old_advisor,
@@ -32,18 +35,33 @@ def save_feedback(account_id, old_advisor, suggested_advisor, final_advisor, rea
         feedback_entry.to_csv(FEEDBACK_FILE, index=False)
 
 # -------------------------------
-# Load Data
+# Load/Save Data
 # -------------------------------
 @st.cache_data
-def load_data(file_path="advisors_extended.xlsx"):
-    df = pd.read_excel(file_path)
-
-    # Merge feedback corrections if available
+def load_data():
+    df = pd.read_excel(DATA_FILE)
+    
     if os.path.exists(FEEDBACK_FILE):
         feedback_df = pd.read_csv(FEEDBACK_FILE)
-        df = df.merge(feedback_df[["Account ID", "Final Advisor"]], on="Account ID", how="left")
-        df["Advisor Name"] = df["Final Advisor"].fillna(df["Advisor Name"])
+        if "Final Advisor" in feedback_df.columns and not feedback_df["Final Advisor"].isnull().all():
+            df = df.merge(feedback_df[["Account ID", "Final Advisor"]], on="Account ID", how="left")
+            df["Advisor Name"] = df.apply(
+                lambda row: row["Final Advisor"] if pd.notna(row.get("Final Advisor")) else row["Advisor Name"],
+                axis=1
+            )
     return df
+
+def save_data(df):
+    df.to_excel(DATA_FILE, index=False, engine="openpyxl")
+
+def log_redistribution(changes):
+    log_entry = pd.DataFrame(changes)
+    if os.path.exists(LOG_FILE):
+        existing = pd.read_excel(LOG_FILE)
+        updated_log = pd.concat([existing, log_entry], ignore_index=True)
+    else:
+        updated_log = log_entry
+    updated_log.to_excel(LOG_FILE, index=False, engine="openpyxl")
 
 # -------------------------------
 # Train Model
@@ -51,23 +69,18 @@ def load_data(file_path="advisors_extended.xlsx"):
 def train_model(df):
     df_train = df.copy()
     encoders = {}
-
     for col in ["Location", "Specialty", "Languages Spoken", "Licenses & Certifications",
                 "Account Type", "Household Composition"]:
         le = LabelEncoder()
         df_train[col] = le.fit_transform(df_train[col].astype(str))
         encoders[col] = le
-
     le_target = LabelEncoder()
     df_train["Advisor_enc"] = le_target.fit_transform(df_train["Advisor Name"])
-
     feature_cols = ["Location", "Specialty", "Languages Spoken", "Licenses & Certifications",
                     "Experience (Years)", "Performance Score", "Client Load (Capacity)",
                     "Assets", "Account Type", "Household Composition"]
-
     model = XGBClassifier(use_label_encoder=False, eval_metric='mlogloss')
     model.fit(df_train[feature_cols], df_train["Advisor_enc"])
-
     return model, encoders, le_target, feature_cols
 
 # -------------------------------
@@ -81,18 +94,18 @@ def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, f
     advisor_assets = remaining_data.groupby("Advisor Name")["Assets"].sum().to_dict()
 
     recommendations = []
+    changes_log = []
 
     for _, account in retiring_accounts.iterrows():
         scores = {}
         explanations = {}
         summaries = {}
 
-        total_weight = sum(weights.values())
         acc_features = account.copy()
         for col, le in encoders.items():
             acc_features[col] = le.transform([str(account[col])])[0]
 
-        X_acc = [acc_features[feature_cols].values]
+        X_acc = acc_features[feature_cols].to_numpy().reshape(1, -1)
         pred_probs = model.predict_proba(X_acc)[0]
 
         for adv in remaining_advisors:
@@ -101,23 +114,26 @@ def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, f
             reason_parts = []
             narrative_parts = []
 
+            # Categorical matching
             for category in ["Location", "Specialty", "Languages Spoken",
                              "Licenses & Certifications", "Account Type", "Household Composition"]:
                 if pd.notna(account.get(category)) and pd.notna(adv_data.get(category)):
                     if str(account[category]).strip().lower() == str(adv_data[category]).strip().lower():
-                        score += weights[category]
+                        score += weights.get(category, 0)
                         reason_parts.append(f"✅ {category} matched")
                         narrative_parts.append(f"same {category.lower()}")
 
-            for num_col in ["Experience (Years)", "Performance Score", "Account Size"]:
+            # Numerical similarity
+            for num_col in ["Experience (Years)", "Performance Score", "Assets"]:
                 if pd.notna(account.get(num_col)) and pd.notna(adv_data.get(num_col)):
                     diff = abs(float(account[num_col]) - float(adv_data[num_col]))
                     similarity = 1 / (1 + diff)
-                    contribution = weights[num_col] * similarity
+                    contribution = weights.get(num_col, 0) * similarity
                     score += contribution
-                    reason_parts.append(f"{num_col} similarity contributed {contribution:.2f}")
+                    reason_parts.append(f"{num_col} similarity +{contribution:.2f}")
                     narrative_parts.append(f"similar {num_col.lower()}")
 
+            # Load penalty
             load_penalty = advisor_loads.get(adv, 0)
             penalty = balance_factor * load_penalty
             score -= penalty
@@ -125,6 +141,7 @@ def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, f
                 reason_parts.append(f"⚖️ Load penalty {penalty:.1f}")
                 narrative_parts.append("balanced workload")
 
+            # AI confidence
             adv_enc = le_target.transform([adv])[0]
             confidence = 100 * pred_probs[adv_enc]
             score += confidence
@@ -135,6 +152,7 @@ def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, f
             explanations[adv] = "; ".join(reason_parts)
             summaries[adv] = f"Assigned to {adv} due to " + ", ".join(narrative_parts[:3]) + ("..." if len(narrative_parts) > 3 else "")
 
+        # Normalize to percentage
         total_score = sum(scores.values())
         if total_score > 0:
             for adv in scores:
@@ -147,6 +165,9 @@ def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, f
         advisor_loads[target] = advisor_loads.get(target, 0) + 1
         advisor_assets[target] = advisor_assets.get(target, 0) + account.get("Assets", 0)
 
+        # Apply assignment to main df
+        df.loc[account.name, "Advisor Name"] = target
+
         recommendations.append({
             "Account ID": account["Account ID"],
             "Old Advisor": retiring_advisor,
@@ -156,6 +177,18 @@ def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, f
             "Summary": summaries[target],
             "Detailed Explanation": explanations[target]
         })
+
+        changes_log.append({
+            "Timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            "Account ID": account["Account ID"],
+            "Old Advisor": retiring_advisor,
+            "New Advisor": target,
+            "Reason": "AI Redistribution"
+        })
+
+    # Save updated assignments and log
+    save_data(df)
+    log_redistribution(changes_log)
 
     return pd.DataFrame(recommendations)
 
@@ -177,15 +210,17 @@ st.subheader("⚖️ Adjust Attribute Weights (0 to 1)")
 weights = {}
 for param in ["Location", "Specialty", "Languages Spoken", "Licenses & Certifications",
               "Experience (Years)", "Performance Score", "Client Load (Capacity)",
-              "Account Size", "Account Type", "Household Composition"]:
+              "Assets", "Account Type", "Household Composition"]:
     weights[param] = st.slider(param, 0.0, 1.0, 0.5, 0.1)
 
 retiring_advisor = st.selectbox("Select Advisor to Retire", df["Advisor Name"].unique().tolist())
 
-# Store recommendations in session
 if "recommendations" not in st.session_state:
     st.session_state.recommendations = None
 
+# -------------------------------
+# Generate AI Recommendations
+# -------------------------------
 if st.button("Generate Recommendations"):
     st.session_state.recommendations = redistribute_accounts_ai(
         df, retiring_advisor, model, encoders, le_target, feature_cols, weights
@@ -193,22 +228,24 @@ if st.button("Generate Recommendations"):
     st.success(f"✅ Redistribution complete for retiring advisor: {retiring_advisor}")
 
 # -------------------------------
-# Show recommendations + override + feedback
+# Display Recommendations + Feedback + Override
 # -------------------------------
 if st.session_state.recommendations is not None:
     recommendations_df = st.session_state.recommendations
 
+    # Main table
     st.dataframe(recommendations_df.drop(columns=["Summary", "Detailed Explanation"]), use_container_width=True)
 
+    # Detailed explanations & feedback
     with st.expander("See Explanations for Each Account"):
         for _, row in recommendations_df.iterrows():
             st.markdown(f"**Account {row['Account ID']} → {row['New Advisor']}**")
             st.write("📝 Summary:", row["Summary"])
             st.write("📊 Detailed:", row["Detailed Explanation"])
 
-            # Feedback buttons
+            # Feedback rating
             rating = st.radio(f"Rate recommendation for Account {row['Account ID']}", ["👍", "👎"], key=f"rating_{row['Account ID']}")
-            if st.button(f"Submit Rating {row['Account ID']}"):
+            if st.button(f"Submit Rating {row['Account ID']}", key=f"submit_{row['Account ID']}"):
                 save_feedback(
                     account_id=row["Account ID"],
                     old_advisor=row["Old Advisor"],
@@ -220,7 +257,41 @@ if st.session_state.recommendations is not None:
 
             st.divider()
 
-    # Workload balance charts
+    # Manual override
+    st.subheader("🔄 Manual Override Recommendation")
+    account_to_override = st.selectbox(
+        "Select Account ID to Override",
+        recommendations_df["Account ID"].tolist()
+    )
+
+    current_assignment = recommendations_df.loc[
+        recommendations_df["Account ID"] == account_to_override, "New Advisor"
+    ].values[0]
+    st.write(f"Current assignment: **{current_assignment}**")
+
+    new_advisor = st.selectbox(
+        "Select New Advisor",
+        [a for a in df["Advisor Name"].unique() if a != retiring_advisor]
+    )
+    reasoning = st.text_area("Reason for override")
+
+    if st.button("Submit Override"):
+        if len(reasoning) < 10:
+            st.error("❌ Please provide a more detailed reasoning.")
+        else:
+            # Update recommendations and main dataframe
+            st.session_state.recommendations.loc[
+                st.session_state.recommendations["Account ID"] == account_to_override, "New Advisor"
+            ] = new_advisor
+            df.loc[df["Account ID"] == account_to_override, "Advisor Name"] = new_advisor
+
+            # Log override
+            with open(OVERRIDE_LOG, "a") as f:
+                f.write(f"{datetime.now()},{account_to_override},{current_assignment},{new_advisor},{reasoning}\n")
+
+            st.success(f"✅ Override complete: Account {account_to_override} reassigned to {new_advisor}")
+
+    # Workload & Assets charts
     before_counts = df["Advisor Name"].value_counts()
     after_counts = pd.concat([
         df[df["Advisor Name"] != retiring_advisor]["Advisor Name"],
@@ -229,8 +300,9 @@ if st.session_state.recommendations is not None:
     workload_df = pd.DataFrame({"Before": before_counts, "After": after_counts}).fillna(0)
     st.subheader("Before & After Workload Distribution")
     st.bar_chart(workload_df)
+    
+    st.bar_chart(workload_df)
 
-    # Assets balance
     before_assets = df.groupby("Advisor Name")["Assets"].sum()
     after_assets = pd.concat([
         df[df["Advisor Name"] != retiring_advisor][["Advisor Name", "Assets"]],
@@ -240,7 +312,7 @@ if st.session_state.recommendations is not None:
     st.subheader("Before & After Asset Distribution")
     st.bar_chart(assets_df)
 
-    # Download option
+    # Download Redistribution Plan
     output = BytesIO()
     recommendations_df.to_excel(output, index=False, engine="openpyxl")
     st.download_button(
@@ -249,3 +321,26 @@ if st.session_state.recommendations is not None:
         file_name=f"redistribution_{retiring_advisor}.xlsx",
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
+
+    # Download Redistribution Log
+    if os.path.exists(LOG_FILE):
+        output_log = BytesIO()
+        pd.read_excel(LOG_FILE).to_excel(output_log, index=False, engine="openpyxl")
+        st.download_button(
+            label="📥 Download Redistribution Log",
+            data=output_log,
+            file_name="redistribution_log.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
+
+    # Download Override Log
+    if os.path.exists(OVERRIDE_LOG):
+        override_df = pd.read_csv(OVERRIDE_LOG, names=["Timestamp", "Account ID", "Old Advisor", "New Advisor", "Reason"])
+        output_override = BytesIO()
+        override_df.to_excel(output_override, index=False, engine="openpyxl")
+        st.download_button(
+            label="📥 Download Override Log",
+            data=output_override,
+            file_name="override_log.xlsx",
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+        )
