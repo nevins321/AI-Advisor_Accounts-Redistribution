@@ -34,6 +34,11 @@ def save_feedback(account_id, old_advisor, suggested_advisor, final_advisor, rea
     else:
         feedback_entry.to_csv(FEEDBACK_FILE, index=False)
 
+def log_override(account_id, old_advisor, new_advisor, reasoning):
+    entry = f"{datetime.now()},{account_id},{old_advisor},{new_advisor},{reasoning}\n"
+    with open(OVERRIDE_LOG, "a") as f:
+        f.write(entry)
+
 # -------------------------------
 # Load/Save Data
 # -------------------------------
@@ -82,6 +87,12 @@ def train_model(df):
     model = XGBClassifier(use_label_encoder=False, eval_metric='mlogloss')
     model.fit(df_train[feature_cols], df_train["Advisor_enc"])
     return model, encoders, le_target, feature_cols
+
+def retrain_model_from_feedback():
+    """Retrains the AI model using the updated feedback and overrides."""
+    global df, model, encoders, le_target, feature_cols
+    df = load_data()
+    model, encoders, le_target, feature_cols = train_model(df)
 
 # -------------------------------
 # Redistribution Logic
@@ -246,14 +257,18 @@ if st.session_state.recommendations is not None:
             # Feedback rating
             rating = st.radio(f"Rate recommendation for Account {row['Account ID']}", ["👍", "👎"], key=f"rating_{row['Account ID']}")
             if st.button(f"Submit Rating {row['Account ID']}", key=f"submit_{row['Account ID']}"):
+                reasoning_text = f"User rated {rating}"
                 save_feedback(
                     account_id=row["Account ID"],
                     old_advisor=row["Old Advisor"],
                     suggested_advisor=row["New Advisor"],
                     final_advisor=row["New Advisor"] if rating == "👍" else None,
-                    reasoning=f"User rated {rating}"
+                    reasoning=reasoning_text
                 )
                 st.success(f"✅ Feedback recorded for Account {row['Account ID']}")
+
+                # Retrain model immediately using updated feedback
+                retrain_model_from_feedback()
 
             st.divider()
 
@@ -286,12 +301,15 @@ if st.session_state.recommendations is not None:
             df.loc[df["Account ID"] == account_to_override, "Advisor Name"] = new_advisor
 
             # Log override
-            with open(OVERRIDE_LOG, "a") as f:
-                f.write(f"{datetime.now()},{account_to_override},{current_assignment},{new_advisor},{reasoning}\n")
-
+            log_override(account_to_override, current_assignment, new_advisor, reasoning)
             st.success(f"✅ Override complete: Account {account_to_override} reassigned to {new_advisor}")
 
+            # Retrain model immediately using updated override
+            retrain_model_from_feedback()
+
+    # -------------------------------
     # Workload & Assets charts
+    # -------------------------------
     before_counts = df["Advisor Name"].value_counts()
     after_counts = pd.concat([
         df[df["Advisor Name"] != retiring_advisor]["Advisor Name"],
@@ -299,8 +317,6 @@ if st.session_state.recommendations is not None:
     ]).value_counts()
     workload_df = pd.DataFrame({"Before": before_counts, "After": after_counts}).fillna(0)
     st.subheader("Before & After Workload Distribution")
-    st.bar_chart(workload_df)
-    
     st.bar_chart(workload_df)
 
     before_assets = df.groupby("Advisor Name")["Assets"].sum()
@@ -312,7 +328,9 @@ if st.session_state.recommendations is not None:
     st.subheader("Before & After Asset Distribution")
     st.bar_chart(assets_df)
 
-    # Download Redistribution Plan
+    # -------------------------------
+    # Download Options
+    # -------------------------------
     output = BytesIO()
     recommendations_df.to_excel(output, index=False, engine="openpyxl")
     st.download_button(
@@ -322,7 +340,6 @@ if st.session_state.recommendations is not None:
         mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
 
-    # Download Redistribution Log
     if os.path.exists(LOG_FILE):
         output_log = BytesIO()
         pd.read_excel(LOG_FILE).to_excel(output_log, index=False, engine="openpyxl")
@@ -330,12 +347,14 @@ if st.session_state.recommendations is not None:
             label="📥 Download Redistribution Log",
             data=output_log,
             file_name="redistribution_log.xlsx",
-            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            mime="application/vnd.openxmlformats-spreadsheetml.sheet"
         )
 
-    # Download Override Log
     if os.path.exists(OVERRIDE_LOG):
-        override_df = pd.read_csv(OVERRIDE_LOG, names=["Timestamp", "Account ID", "Old Advisor", "New Advisor", "Reason"])
+        override_df = pd.read_csv(
+            OVERRIDE_LOG,
+            names=["Timestamp", "Account ID", "Old Advisor", "New Advisor", "Reason"]
+        )
         output_override = BytesIO()
         override_df.to_excel(output_override, index=False, engine="openpyxl")
         st.download_button(
