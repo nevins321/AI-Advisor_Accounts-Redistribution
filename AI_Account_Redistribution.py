@@ -18,7 +18,7 @@ LOG_FILE = "redistribution_log.xlsx"
 OVERRIDE_LOG = "override_log.csv"
 
 # -------------------------------
-# Feedback Functions
+# Helper Functions
 # -------------------------------
 def save_feedback(account_id, old_advisor, suggested_advisor, final_advisor, reasoning):
     feedback_entry = pd.DataFrame([{
