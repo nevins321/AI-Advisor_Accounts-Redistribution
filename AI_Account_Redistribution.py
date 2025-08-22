@@ -45,16 +45,33 @@ def log_override(account_id, old_advisor, new_advisor, reasoning):
 @st.cache_data
 def load_data():
     df = pd.read_excel(DATA_FILE)
-    
+
+    # Drop duplicate Final Advisor column if it already exists
+    if "Final Advisor" in df.columns:
+        df = df.drop(columns=["Final Advisor"])
+
     if os.path.exists(FEEDBACK_FILE):
         feedback_df = pd.read_csv(FEEDBACK_FILE)
+
         if "Final Advisor" in feedback_df.columns and not feedback_df["Final Advisor"].isnull().all():
-            df = df.merge(feedback_df[["Account ID", "Final Advisor"]], on="Account ID", how="left")
+            df = df.merge(
+                feedback_df[["Account ID", "Final Advisor"]],
+                on="Account ID",
+                how="left"
+            )
+
+            # Apply final advisor override if available
             df["Advisor Name"] = df.apply(
-                lambda row: row["Final Advisor"] if pd.notna(row.get("Final Advisor")) else row["Advisor Name"],
+                lambda row: row["Final Advisor"]
+                if pd.notna(row.get("Final Advisor"))
+                else row["Advisor Name"],
                 axis=1
             )
+
+            # Drop helper column so it doesn’t stick around
+            df = df.drop(columns=["Final Advisor"])
     return df
+
 
 def save_data(df):
     df.to_excel(DATA_FILE, index=False, engine="openpyxl")
@@ -363,3 +380,5 @@ if st.session_state.recommendations is not None:
             file_name="override_log.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
+        
+        #streamlit run AI_Account_Redistribution.py
