@@ -115,27 +115,34 @@ def retrain_model_from_feedback():
 # Redistribution Logic
 # -------------------------------
 def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, feature_cols, weights, balance_factor=0.5):
+    # Separate retiring advisor’s accounts from remaining advisors
     remaining_advisors = [a for a in df["Advisor Name"].unique() if a != retiring_advisor]
     retiring_accounts = df[df["Advisor Name"] == retiring_advisor].copy()
     remaining_data = df[df["Advisor Name"] != retiring_advisor].copy()
+
+    # Track current workload and assets per advisor
     advisor_loads = remaining_data["Advisor Name"].value_counts().to_dict()
     advisor_assets = remaining_data.groupby("Advisor Name")["Assets"].sum().to_dict()
 
-    recommendations = []
-    changes_log = []
+    recommendations = [] # Final redistribution results
+    changes_log = [] # Logging for auditing changes
 
+    # Process each account from the retiring advisor
     for _, account in retiring_accounts.iterrows():
         scores = {}
         explanations = {}
         summaries = {}
 
+        # Encode categorical features for ML model
         acc_features = account.copy()
         for col, le in encoders.items():
             acc_features[col] = le.transform([str(account[col])])[0]
 
+        # Predict advisor probalitites from the ML model
         X_acc = acc_features[feature_cols].to_numpy().reshape(1, -1)
         pred_probs = model.predict_proba(X_acc)[0]
 
+        # Compute match score for each remaining advisor
         for adv in remaining_advisors:
             adv_data = df[df["Advisor Name"] == adv].iloc[0]
             score = 0
@@ -176,26 +183,30 @@ def redistribute_accounts_ai(df, retiring_advisor, model, encoders, le_target, f
             reason_parts.append(f"🤖 AI confidence +{confidence:.1f}")
             narrative_parts.append("AI confidence")
 
+            # Store results for this advisor
             scores[adv] = max(0, score)
             explanations[adv] = "; ".join(reason_parts)
             summaries[adv] = f"Assigned to {adv} due to " + ", ".join(narrative_parts[:3]) + ("..." if len(narrative_parts) > 3 else "")
 
-        # Normalize to percentage
+        # Normalize score into percentage
         total_score = sum(scores.values())
         if total_score > 0:
             for adv in scores:
                 scores[adv] = (scores[adv] / total_score) * 100
 
+        # Pick the advisors with the highest score, breaks tie randomly
         max_score = max(scores.values())
         best_matches = [adv for adv, sc in scores.items() if sc == max_score]
         target = random.choice(best_matches)
 
+        # Update advisor loads and assets after assignment
         advisor_loads[target] = advisor_loads.get(target, 0) + 1
         advisor_assets[target] = advisor_assets.get(target, 0) + account.get("Assets", 0)
 
-        # Apply assignment to main df
+        # Apply change to dataframe
         df.loc[account.name, "Advisor Name"] = target
 
+        # Save recommendation and log entry
         recommendations.append({
             "Account ID": account["Account ID"],
             "Old Advisor": retiring_advisor,
